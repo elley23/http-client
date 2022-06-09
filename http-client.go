@@ -18,7 +18,7 @@ import (
 
 var durl = "https://dl.google.com/go/go1.10.3.darwin-amd64.pkg"
 
-func downloadFile() {
+func downloadFileWithRange() {
 	srcUrl, err := url.ParseRequestURI(durl)
 	check(err)
 
