@@ -27,6 +27,7 @@ func staticTest() {
 	body, err := ioutil.ReadAll(resp.Body)
 	//fmt.Println("%s", string(header))
 	fmt.Println("%s", string(body[:]))
+	return
 }
 
 //访问自己做的http server，下载C:/wuliu/documents/test/testa.jpg到testb.jpg,支持断点续传
