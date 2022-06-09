@@ -162,7 +162,7 @@ func fileTest() {
 func main() {
 	//staticTest()
 	//breakpointDownload()
-	//downloadFile()
+	//downloadFileWithRange()
 	//dir, _ := os.Getwd()
 	//fmt.Println(dir)
 	/*	err := os.RemoveAll("./templates")
