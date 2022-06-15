@@ -26,8 +26,7 @@ func staticTest() {
 	//header, err := ioutil.ReadAll(resp.Header)
 	body, err := ioutil.ReadAll(resp.Body)
 	//fmt.Println("%s", string(header))
-	fmt.Println("%s", string(body[:]))
-	return
+	fmt.Printf("%s", string(body[:]))
 }
 
 //访问自己做的http server，下载C:/wuliu/documents/test/testa.jpg到testb.jpg,支持断点续传
@@ -125,7 +124,7 @@ func breakpointDownload() {
 		count += int64(n3)
 		countf = float64(count)
 		totalf = float64(total)
-		bfb = fmt.Sprintf("%.2f%", countf/totalf*100)
+		bfb = fmt.Sprintf("%.2f", countf/totalf*100)
 		fmt.Println("本次读取了：", n3, "总共已下载：", count, "文件总大小：", total, "下载进度：", bfb)
 
 		w := strconv.Itoa(int(count)) + "/" + strconv.Itoa(int(total)) + "/" + bfb
@@ -166,10 +165,6 @@ func main() {
 	//downloadFileWithRange()
 	//dir, _ := os.Getwd()
 	//fmt.Println(dir)
-	/*	err := os.RemoveAll("./templates")
-		if err != nil {
-			fmt.Println("remove all failure...")
-			fmt.Println(err)
-		}*/
-	downloadFileGo()
+	DownloadFileGo()
+
 }
