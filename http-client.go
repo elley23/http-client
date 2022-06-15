@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,8 +17,15 @@ import (
 )
 
 //downloadFile,做个http client从固定的网站下载文件，支持断点续传，下载的文件保存在当前目录
+//cross over: 339.32M
+//http://downza.91speed.vip/2022/04/21/crossover.zip
+//win10 3.61G
+//https://windows.xnayw.cn/download/win1064.html
 
-var durl = "https://dl.google.com/go/go1.10.3.darwin-amd64.pkg"
+//var durl = "http://downza.91speed.vip/2022/04/21/crossover.zip"
+
+//4.4G
+var durl = "http://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/media/zh-cn/ProPlus2019Retail.img"
 
 func downloadFileWithRange() {
 	srcUrl, err := url.ParseRequestURI(durl)
@@ -110,7 +119,7 @@ func downloadFileWithRange() {
 	count += int64(n2)
 	countf = float64(count)
 	totalf = float64(total)
-	bfb = fmt.Sprintf("%.2f%", countf/totalf*100)
+	bfb = fmt.Sprintf("%.2f", countf/totalf*100)
 	fmt.Println(fmt.Sprintf("本次读取了：%d, 总共已下载：%d, 文件总大小：%d, 下载进度：%s", n2, count, total, bfb))
 
 	w := strconv.Itoa(int(count)) + "/" + strconv.Itoa(int(total)) + "/" + bfb
@@ -135,7 +144,7 @@ func printRespInfo(resp *http.Response) {
 }
 
 //实现goroutine处理大文件下载
-func downloadFileGo() {
+func DownloadFileGo() {
 	srcUrl, err := url.ParseRequestURI(durl)
 	if err != nil {
 		panic("ParseRequestURI failure!")
@@ -151,7 +160,7 @@ func downloadFileGo() {
 	req.Header.Add("Range", "bytes=0-0")
 	resp, err := myClient.Do(req)
 	if err != nil {
-		panic("myClient.Do: HTTP HEAD send failure..")
+		panic("myClient.Do: HTTP HEAD send failure.." + durl)
 	}
 	defer resp.Body.Close()
 
@@ -174,7 +183,10 @@ func downloadFileGo() {
 	}
 
 	//并发处理下载文件
-	downloadFileGoroutine(filename, total, durl)
+	//downloadFileGoroutine(filename, total, durl)
+
+	//用channel实现, 并发处理下载文件
+	downloadFileGoroutine1(filename, total, durl)
 
 }
 
@@ -195,14 +207,50 @@ func downloadFileNoRange(filename string, url string) {
 	v := resp.Header.Get("Content-Length")
 	contentLength, _ := strconv.ParseInt(v, 10, 64)
 
-	data, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		panic("ioutil.Readall(resp.Body) failure...")
+	//一次性存取
+	/*
+		data, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			panic("ioutil.Readall(resp.Body) failure...")
+		}
+		n, err := file1.Write(data)
+		if err != nil {
+			panic("file.Write failure...")
+		}
+		if n != int(contentLength) {
+			fmt.Println("The file size maybe wrong...")
+		}
+
+	*/
+	//一次性存取
+
+	//分片存储到文件
+	n := 0
+	buf := make([]byte, 1024*1024)
+	flag := 0
+	for {
+		num, err := resp.Body.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				//break
+				fmt.Println("resp.Body.Read EOF...")
+			} else {
+				fmt.Println("resp.Body.Read failure")
+			}
+			flag = 1
+		}
+
+		file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, os.ModePerm)
+		file.Seek(int64(n), io.SeekStart)
+		num, err = file.Write(buf[:num])
+		n += num
+
+		if flag == 1 {
+			break
+		}
 	}
-	n, err := file1.Write(data)
-	if err != nil {
-		panic("file.Write failure...")
-	}
+	//分片存储到文件
+
 	if n != int(contentLength) {
 		fmt.Println("The file size maybe wrong...")
 	}
@@ -341,4 +389,326 @@ func mergeFiles(file *os.File, offset int64, srcFilename string) (n int64, err e
 
 	}
 	return n1, nil
+}
+
+//////////////////////////////////////////
+/////////////////////////////////////////
+//用channel实现多协程下载
+type Range struct {
+	start int64
+	end   int64
+}
+
+var chanRange chan Range
+var done chan struct{}
+
+var eachRangeLen int64 = 1024 * 1024 * 10 //10M
+
+func downloadFileGoroutine1(filename string, size int64, url string) {
+	ntStart := time.Now()
+
+	// 1.初始化管道
+	if size > 1000000000 {
+		eachRangeLen = 1024 * 1024 * 20 //20M
+	}
+	count := size / eachRangeLen
+	if count > 1000 {
+		count = 1000
+	}
+	if count < 50 {
+		count = 50
+	}
+	chanRange = make(chan Range, count)
+
+	//SliceSizeToRange(size)
+
+	//启动多个协程下载文件
+	var rwLock sync.RWMutex
+
+	//判断是否已经存在描述文件，是否是最初的下载
+	file, err := os.Open(filename + "_tmp.txt")
+	if err != nil { //没有描述文件，最开始的下载
+		for i := 0; i < int(count/4); i++ {
+			wg.Add(1)
+			go DownloadFileRange(&rwLock, url, filename, size)
+
+		}
+		fmt.Printf("共启动%d个协程...\n", int(count/4))
+
+		//wg.Add(1)
+		//go checkDownloadDone()
+
+		//把range切片,放进channel
+		SliceSizeToRange(0, size)
+		close(chanRange)
+
+		wg.Wait()
+	}
+	file.Close()
+
+	//断点续传的情况
+	cnt := (size / eachRangeLen) * 2
+	if cnt < 10 {
+		cnt = 10
+	}
+	//rangeArr := make([]Range, cnt)
+	//var rangeCnt int = 0
+
+	rangeArr, tmpSize := GetMissingRanges(filename, size)
+	if tmpSize != 0 {
+		chanRange = make(chan Range, count)
+		for i := 0; i < int(count/4); i++ {
+			wg.Add(1)
+			go DownloadFileRange(&rwLock, url, filename, size)
+		}
+		//rangeSlice := rangeArr[:rangeCnt]
+		SliceTheMissingRanges(size, rangeArr)
+		close(chanRange)
+
+		wg.Wait()
+	}
+
+	ntEnd := time.Now()
+	fmt.Printf("共用时：%v\n", ntEnd.Sub(ntStart))
+
+	//打印一下下载的文件大小是否一直
+	file, _ = os.Open(filename)
+	info, _ := file.Stat()
+	fmt.Printf("下载的文件大小：%d/%d\n", info.Size(), size)
+}
+
+func checkDownloadDone() {
+	for _ = range done {
+		close(chanRange)
+		break
+	}
+	close(done)
+	wg.Done()
+}
+
+func DownloadFileRange(rwLock *sync.RWMutex, url string, filename string, filesize int64) {
+
+	for rangeGet := range chanRange {
+		myClient := &http.Client{}
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		HandleError(err, "http.NewRequest")
+		if rangeGet.end == 0 {
+			req.Header.Add("Range", fmt.Sprintf("bytes=%d-", rangeGet.start))
+		} else {
+			req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d", rangeGet.start, rangeGet.end))
+		}
+
+		resp, err := myClient.Do(req)
+		if err != nil {
+			resp, err = myClient.Do(req)
+		}
+		if err != nil {
+			//chanRange <- Range{rangeGet.start, rangeGet.end}
+			HandleError(err, "myClient.Do")
+			return
+		}
+		//defer resp.Body.Close()
+
+		//print resp
+		//printRespInfo(resp)
+
+		//一次存储到文件
+		/*
+			bytes, err := ioutil.ReadAll(resp.Body)
+			HandleError(err, "ioutil.ReadAll resp.body")
+
+				rwLock.Lock()
+				file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, os.ModePerm)
+				HandleError(err, "os.OpenFile filename")
+				file.Seek(rangeGet.start, io.SeekStart)
+				n, err := file.Write(bytes)
+				rwLock.Unlock()
+				HandleError(err, "file write")
+		*/
+		//一次存储到文件
+
+		//分片存储到文件
+		seekStart := rangeGet.start
+		n := 0
+		buf := make([]byte, 1024*1024)
+		flag := 0
+		for {
+			num, err := resp.Body.Read(buf)
+			if err != nil {
+				if err == io.EOF {
+					//break
+					fmt.Println("resp.Body.Read EOF...")
+				} else {
+					fmt.Println("resp.Body.Read failure")
+				}
+				flag = 1
+			}
+
+			rwLock.Lock()
+			file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, os.ModePerm)
+			HandleError(err, "os.OpenFile filename")
+			file.Seek(seekStart, io.SeekStart)
+			num, err = file.Write(buf[:num])
+			file.Close()
+			rwLock.Unlock()
+			n += num
+			seekStart += int64(num)
+			HandleError(err, "file write")
+
+			if flag == 1 {
+				break
+			}
+		}
+		//分片存储到文件
+
+		//打印下载信息
+		file, _ := os.Open(filename)
+		info, _ := file.Stat()
+		fmt.Printf("goroutine %d :\n,", GetGID())
+		fmt.Printf("This download Range:%d-%d, The download filesize %d/%d\n", rangeGet.start, rangeGet.start+int64(n)-1, info.Size(), filesize)
+
+		file.Close()
+
+		//fmt.Printf("%s writes size is %d\n", filename, n)
+
+		//写入描述文件
+		tmpfilename := filename + "_tmp.txt"
+		var RangeStr string
+		if int64(n) >= rangeGet.end-rangeGet.start {
+			RangeStr = strconv.FormatInt(rangeGet.start, 10) + "-" + strconv.FormatInt(rangeGet.end, 10) + "\n"
+		} else {
+			RangeStr = strconv.FormatInt(rangeGet.start, 10) + "-" + strconv.FormatInt(rangeGet.start+int64(n)-1, 10) + "\n"
+		}
+		rwLock.Lock()
+		tmpfile, err := os.OpenFile(tmpfilename, os.O_CREATE|os.O_WRONLY, os.ModePerm)
+		HandleError(err, "open file tmpfilename")
+		info, err = tmpfile.Stat()
+		HandleError(err, "tmpfile.Stat")
+		tmpfile.Seek(info.Size(), io.SeekStart)
+		tmpfile.WriteString(RangeStr)
+		rwLock.Unlock()
+		tmpfile.Close()
+
+		resp.Body.Close()
+	}
+	wg.Done()
+}
+
+func HandleError(err error, why string) {
+	if err != nil {
+		fmt.Println(why, err)
+	}
+}
+
+func SliceSizeToRange(rangeStart int64, rangeEnd int64) {
+	var start int64 = rangeStart
+	var end int64 = 0
+	var n int = 0
+	for {
+		if start > rangeEnd {
+			fmt.Printf("共切了%d片\n", n)
+			break
+		}
+
+		end = start + eachRangeLen - 1
+		if end > rangeEnd {
+			end = rangeEnd
+		}
+		chanRange <- Range{start, end}
+
+		start = end + 1
+		n++
+	}
+
+}
+
+func SliceTheMissingRanges(filesize int64, rangeArr []Range) {
+
+	i := 0
+	for i = 1; i < len(rangeArr); i++ {
+		if rangeArr[i].start > rangeArr[i-1].end+1 {
+			SliceSizeToRange(rangeArr[i-1].end+1, rangeArr[i].start-1)
+		}
+	}
+	v := rangeArr[i-1].end
+	if v != 0 && v < filesize {
+		SliceSizeToRange(v+1, filesize)
+	}
+}
+
+func GetGID() uint64 {
+	b := make([]byte, 64)
+	b = b[:runtime.Stack(b, false)]
+	b = bytes.TrimPrefix(b, []byte("goroutine "))
+	b = b[:bytes.IndexByte(b, ' ')]
+	n, _ := strconv.ParseUint(string(b), 10, 64)
+	return n
+}
+
+func GetMissingRanges(filename string, filesize int64) (rangeArr []Range, size int64) {
+
+	//sort the ranges in file
+	filename = filename + "_tmp.txt"
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, 0
+	}
+
+	var buf [1024]byte
+	var content []byte
+
+	for {
+		_, err := file.Read(buf[:])
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+		}
+		content = append(content, buf[:]...)
+
+	}
+	info, _ := file.Stat()
+
+	content1 := content[:info.Size()-1]
+	file.Close()
+
+	str := string(content1)
+	bytesArr := strings.Split(str, "\n")
+
+	rangeSlice := make([]Range, len(bytesArr))
+	//rangeSlice := rangeArr[:len(bytesArr)]
+	for i := 0; i < len(bytesArr); i++ {
+		rangeStr := strings.Split(bytesArr[i], "-")
+		rangeSlice[i].start, _ = strconv.ParseInt(rangeStr[0], 10, 64)
+		rangeSlice[i].end, _ = strconv.ParseInt(rangeStr[1], 10, 64)
+	}
+	for i := 0; i < len(rangeSlice); i++ {
+		minIndex := i
+		for j := i + 1; j < len(rangeSlice); j++ {
+			if rangeSlice[j].start < rangeSlice[minIndex].start {
+				minIndex = j
+			}
+		}
+		if minIndex != i {
+			rangeSlice[minIndex], rangeSlice[i] = rangeSlice[i], rangeSlice[minIndex]
+		}
+	}
+
+	//find the missing ranges
+
+	size = 0
+	for i := 1; i < len(rangeSlice); i++ {
+		if rangeSlice[i].start > rangeSlice[i-1].end+1 {
+			//chanRange <- Range{rangeSlice[i-1].end + 1, rangeSlice[i].start - 1}
+			//fmt.Println(rangeSlice[i-1].end+1, rangeSlice[i].start-1)
+			size += rangeSlice[i].start - rangeSlice[i-1].end - 1
+		}
+	}
+
+	v := rangeSlice[len(rangeSlice)-1].end
+	if v != 0 && v < filesize {
+		size += filesize - v
+	}
+
+	return rangeSlice, size
 }
